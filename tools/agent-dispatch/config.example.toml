@@ -1,0 +1,48 @@
+[worker]
+poll_interval_seconds = 30
+state_db = "~/.local/state/agent-dispatch/state.db"
+
+[[projects]]
+name = "codecrawler"
+github_repo = "ugliansky/codecrawler"
+local_path = "/home/me/src/codecrawler"
+allowed_authors = ["ugliansky"]
+trigger_label = "agent:ready"
+close_issue_on_complete = false
+sandbox = "workspace-write"
+approve_for_me = true
+
+[projects.labels]
+running = "agent:running"
+waiting = "agent:waiting"
+completed = "agent:done"
+failed = "agent:failed"
+rejected = "agent:rejected"
+
+[projects.messages]
+start_prompt = "Выполни таск номер $issue_number."
+resume_prompt = """
+В issue #$issue_number человек $comment_author ответил:
+
+$comment_body
+
+Продолжи работу над таском.
+"""
+started_comment = "Локальный агент начал работу над issue #$issue_number."
+waiting_comment = """
+Агенту нужна помощь:
+
+$message
+
+Ответьте следующим комментарием в этом issue.
+"""
+completed_comment = """
+Агент закончил работу:
+
+$message
+"""
+failed_comment = """
+Агент не смог закончить задачу:
+
+$message
+"""
