@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cx_codex_bin="$(command -v codex)" || {
+  printf 'cx: codex is not available in PATH\n' >&2
+  exit 1
+}
+
+if [[ -n "${TMUX:-}" ]]; then
+  if [[ -n "${CX_TMUX_SESSION:-}" ]]; then
+    exec "$cx_codex_bin" \
+      -c "shell_environment_policy.set.CX_TMUX_SESSION=\"$CX_TMUX_SESSION\"" \
+      "$@"
+  fi
+  exec "$cx_codex_bin" "$@"
+fi
+
+for cx_required_command in git tmux lazygit; do
+  command -v "$cx_required_command" >/dev/null 2>&1 || {
+    printf 'cx: %s is not available in PATH\n' "$cx_required_command" >&2
+    exit 1
+  }
+done
+
+cx_lazygit_dir=''
+cx_candidate=''
+cx_candidate_root=''
+cx_session=''
+cx_codex_pane=''
+cx_lazygit_pane=''
+cx_codex_cmd=''
+cx_child_git_roots=()
+
+if [[ -n "${CX_GIT_DIR:-}" ]]; then
+  cx_lazygit_dir="$(git -C "$CX_GIT_DIR" rev-parse --show-toplevel 2>/dev/null)" || {
+    printf 'cx: CX_GIT_DIR is not inside a Git repository: %s\n' "$CX_GIT_DIR" >&2
+    exit 1
+  }
+elif cx_lazygit_dir="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"; then
+  :
+else
+  for cx_candidate in "$PWD"/*; do
+    [[ -d "$cx_candidate" ]] || continue
+    cx_candidate_root="$(git -C "$cx_candidate" rev-parse --show-toplevel 2>/dev/null)" || continue
+    cx_child_git_roots+=("$cx_candidate_root")
+  done
+
+  if (( ${#cx_child_git_roots[@]} == 1 )); then
+    cx_lazygit_dir="${cx_child_git_roots[0]}"
+  else
+    cx_lazygit_dir="$PWD"
+  fi
+fi
+
+cx_session="$(tmux new-session -d -P -F '#{session_id}' -c "$PWD")" || exit
+cx_codex_pane="$(tmux display-message -p -t "$cx_session:0.0" '#{pane_id}')" || {
+  tmux kill-session -t "$cx_session"
+  exit 1
+}
+
+tmux set-environment -t "$cx_session" CX_TMUX_SESSION "$cx_session"
+tmux set-option -p -t "$cx_codex_pane" @cx_role codex
+printf -v cx_codex_cmd '%q ' \
+  "$cx_codex_bin" \
+  -c "shell_environment_policy.set.CX_TMUX_SESSION=\"$cx_session\"" \
+  "$@"
+
+tmux respawn-pane -k -t "$cx_codex_pane" -c "$PWD" "$cx_codex_cmd" || {
+  tmux kill-session -t "$cx_session"
+  exit 1
+}
+
+cx_lazygit_pane="$(
+  tmux split-window -d -P -F '#{pane_id}' -h -l '38%' \
+    -t "$cx_codex_pane" -c "$cx_lazygit_dir" lazygit
+)" || {
+  tmux kill-session -t "$cx_session"
+  exit 1
+}
+
+tmux set-option -p -t "$cx_lazygit_pane" @cx_role lazygit
+tmux select-pane -t "$cx_codex_pane"
+tmux attach-session -t "$cx_session"
