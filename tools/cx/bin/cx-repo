@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if (( $# != 1 )); then
+  printf 'Usage: cx-repo <path-inside-git-repository>\n' >&2
+  exit 2
+fi
+
+cx_repo_root="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || {
+  printf 'cx-repo: not inside a Git repository: %s\n' "$1" >&2
+  exit 1
+}
+
+cx_lazygit_bin="$(command -v lazygit)" || {
+  printf 'cx-repo: lazygit is not available in PATH\n' >&2
+  exit 1
+}
+
+if [[ -n "${CX_TMUX_SESSION:-}" ]]; then
+  cx_session="$CX_TMUX_SESSION"
+elif [[ -n "${TMUX_PANE:-}" ]]; then
+  cx_session="$(tmux display-message -p -t "$TMUX_PANE" '#{session_id}')"
+else
+  printf '%s\n' \
+    'cx-repo: cannot identify the owning tmux session;' \
+    'restart Codex via cx so CX_TMUX_SESSION is available' >&2
+  exit 1
+fi
+
+if ! tmux has-session -t "$cx_session" 2>/dev/null; then
+  printf 'cx-repo: tmux session no longer exists: %s\n' "$cx_session" >&2
+  exit 1
+fi
+
+mapfile -t cx_tagged_panes < <(
+  tmux list-panes -t "$cx_session" -F '#{pane_id}|#{@cx_role}' |
+    awk -F '|' '$2 == "lazygit" { print $1 }'
+)
+
+if (( ${#cx_tagged_panes[@]} > 1 )); then
+  printf 'cx-repo: session %s has more than one cx lazygit pane\n' "$cx_session" >&2
+  exit 1
+fi
+
+if (( ${#cx_tagged_panes[@]} == 1 )); then
+  cx_lazygit_pane="${cx_tagged_panes[0]}"
+else
+  mapfile -t cx_lazygit_panes < <(
+    tmux list-panes -t "$cx_session" -F '#{pane_id}|#{pane_current_command}' |
+      awk -F '|' '$2 == "lazygit" { print $1 }'
+  )
+
+  if (( ${#cx_lazygit_panes[@]} == 1 )); then
+    cx_lazygit_pane="${cx_lazygit_panes[0]}"
+    tmux set-option -p -t "$cx_lazygit_pane" @cx_role lazygit
+  elif (( ${#cx_lazygit_panes[@]} == 0 )); then
+    cx_active_pane="$(tmux display-message -p -t "$cx_session" '#{pane_id}')"
+    cx_lazygit_pane="$(
+      tmux split-window -d -P -F '#{pane_id}' -h -l '38%' \
+        -t "$cx_active_pane" -c "$cx_repo_root" "$cx_lazygit_bin"
+    )"
+    tmux set-option -p -t "$cx_lazygit_pane" @cx_role lazygit
+    printf 'cx-repo: lazygit opened at %s\n' "$cx_repo_root"
+    exit 0
+  else
+    printf 'cx-repo: session %s has several untagged lazygit panes\n' "$cx_session" >&2
+    exit 1
+  fi
+fi
+
+tmux respawn-pane -k -t "$cx_lazygit_pane" -c "$cx_repo_root" "$cx_lazygit_bin"
+printf 'cx-repo: lazygit switched to %s\n' "$cx_repo_root"
