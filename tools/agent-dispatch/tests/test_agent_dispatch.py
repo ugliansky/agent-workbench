@@ -200,5 +200,90 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(reset.last_message, "")
 
 
+class RecoveryTests(unittest.TestCase):
+    def test_replays_consumed_resume_command_after_worker_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = agent_dispatch.Project(
+                name="codecrawler",
+                github_repo="ugliansky/codecrawler",
+                local_path=root,
+                allowed_authors=frozenset({"ugliansky"}),
+                trigger_label="agent:queued",
+                close_issue_on_complete=False,
+                sandbox="workspace-write",
+                approve_for_me=True,
+                resume_command="/agent continue",
+                turn_timeout_seconds=3600,
+                completion_requires_closed_issue=True,
+                disable_issue_title="[DISABLE DAEMON]",
+                labels=agent_dispatch.Labels(),
+                messages=agent_dispatch.Messages(),
+            )
+            dispatcher = agent_dispatch.Dispatcher(
+                agent_dispatch.Config(
+                    poll_interval_seconds=30,
+                    state_db=root / "state.db",
+                    projects=(project,),
+                )
+            )
+            issue = agent_dispatch.Issue(
+                project_name="codecrawler",
+                number=175,
+                title="Dispatch protocol",
+                author="ugliansky",
+                url="https://example.test/175",
+            )
+            task = dispatcher.store.create(issue, "running")
+            dispatcher.store.update(
+                task,
+                thread_id="thread-175",
+                last_comment_id=200,
+                last_message="previous question",
+            )
+
+            class FakeGitHub:
+                def __init__(self):
+                    self.transitions = []
+
+                def comments(self, project, issue_number):
+                    return [
+                        agent_dispatch.Comment(
+                            comment_id=199,
+                            author="ugliansky",
+                            body="<!-- agent-dispatch --> waiting",
+                            url="https://example.test/worker",
+                        ),
+                        agent_dispatch.Comment(
+                            comment_id=200,
+                            author="ugliansky",
+                            body="/agent continue accepted risk",
+                            url="https://example.test/human",
+                        ),
+                    ]
+
+                def comment(self, project, issue_number, body):
+                    self.body = body
+                    return 201
+
+                def transition(self, project, issue_number, remove, add):
+                    self.transitions.append((remove, add))
+
+            github = FakeGitHub()
+            dispatcher.github = github
+            dispatcher._recover_interrupted()
+
+            recovered = dispatcher.store.get("codecrawler", 175)
+            self.assertIsNotNone(recovered)
+            self.assertEqual(recovered.state, "waiting")
+            self.assertEqual(recovered.thread_id, "thread-175")
+            self.assertEqual(recovered.last_comment_id, 199)
+            self.assertIn("автоматически", github.body)
+            self.assertEqual(
+                github.transitions,
+                [(project.labels.running, project.labels.waiting)],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,11 @@ local port.
 6. A new comment by an allowed author beginning with `/agent continue`
    resumes that same thread. The cycle continues until completion or failure.
 
+If the worker restarts during a resumed turn, it preserves the thread and
+automatically replays the already accepted resume command after returning the
+task through `agent:waiting`. An interrupted initial turn without a persisted
+thread waits for an explicit `/agent continue` instead of being guessed complete.
+
 An open issue whose title is exactly `[DISABLE DAEMON]`, created by an allowed
 author, pauses that repository. The worker acknowledges the control issue and
 keeps polling without claiming or resuming tasks. Closing the issue restores

@@ -937,20 +937,61 @@ class Dispatcher:
             project = self.projects.get(task.project_name)
             if project is None:
                 continue
-            message = "Локальный worker был перезапущен во время выполнения задачи."
-            task = self.store.update(task, state="failed", last_message=message)
-            try:
-                body = render(
-                    project.messages.failed_comment,
-                    self._template_values(project, task, message=message),
+            replay_comment: Comment | None = None
+            if task.thread_id is not None:
+                comments = self.github.comments(project, task.issue_number)
+                resumable = [
+                    comment
+                    for comment in comments
+                    if comment.comment_id <= task.last_comment_id
+                    and comment.author.casefold() in project.allowed_authors
+                    and MARKER not in comment.body
+                    and comment.body.strip().casefold().startswith(
+                        project.resume_command.casefold()
+                    )
+                ]
+                if resumable:
+                    replay_comment = resumable[-1]
+
+            if replay_comment is not None:
+                message = (
+                    "Локальный worker был перезапущен во время resumed turn. "
+                    "Последняя разрешённая resume-команда будет автоматически "
+                    "переиграна в том же Codex thread после повторной проверки "
+                    "live-состояния."
                 )
-                self.github.comment(project, task.issue_number, body)
+                replay_watermark = replay_comment.comment_id - 1
+            else:
+                message = (
+                    "Локальный worker был перезапущен во время выполнения задачи. "
+                    f"Ответьте через `{project.resume_command} <указание>`, чтобы "
+                    "безопасно продолжить."
+                )
+                replay_watermark = task.last_comment_id
+
+            task = self.store.update(
+                task,
+                state="waiting",
+                last_message=message,
+                last_comment_id=replay_watermark,
+            )
+            try:
+                if replay_comment is not None:
+                    body = f"Восстановление после restart:\n\n{message}"
+                else:
+                    body = render(
+                        project.messages.waiting_comment,
+                        self._template_values(project, task, message=message),
+                    )
+                comment_id = self.github.comment(project, task.issue_number, body)
                 self.github.transition(
                     project,
                     task.issue_number,
                     project.labels.running,
-                    project.labels.failed,
+                    project.labels.waiting,
                 )
+                if replay_comment is None:
+                    self.store.update(task, last_comment_id=comment_id)
             except DispatchError as error:
                 print(
                     f"failed to publish interrupted state for "
