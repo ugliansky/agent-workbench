@@ -23,6 +23,7 @@ from typing import Any, Sequence
 
 
 MARKER = "<!-- agent-dispatch -->"
+DISABLE_ACK_MARKER = "<!-- agent-dispatch:disable-ack -->"
 RESULT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -46,6 +47,7 @@ TEMPLATE_FIELDS = {
     "comment_author",
     "comment_body",
     "comment_url",
+    "resume_command",
 }
 PROTOCOL = """
 
@@ -82,11 +84,16 @@ class Messages:
     started_comment: str = "Локальный агент начал работу над issue #$issue_number."
     waiting_comment: str = (
         "Агенту нужна помощь:\n\n$message\n\n"
-        "Ответьте следующим комментарием в этом issue."
+        "Ответьте комментарием `$resume_command <ответ>` в этом issue."
     )
     completed_comment: str = "Агент закончил работу:\n\n$message"
     failed_comment: str = "Агент не смог закончить задачу:\n\n$message"
     rejected_comment: str = "Задача отклонена локальным worker:\n\n$message"
+    paused_comment: str = (
+        "$resume_command не требуется: worker приостановлен, пока этот issue открыт. "
+        "Закройте issue, чтобы worker снова начал принимать и продолжать задачи. "
+        "Уже запущенный Codex turn принудительно не прерывается."
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -99,6 +106,10 @@ class Project:
     close_issue_on_complete: bool
     sandbox: str
     approve_for_me: bool
+    resume_command: str
+    turn_timeout_seconds: int
+    completion_requires_closed_issue: bool
+    disable_issue_title: str
     labels: Labels
     messages: Messages
 
@@ -147,15 +158,22 @@ class Runner:
         *,
         cwd: Path | None = None,
         check: bool = True,
+        timeout_seconds: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        result = subprocess.run(
-            list(args),
-            cwd=cwd,
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        try:
+            result = subprocess.run(
+                list(args),
+                cwd=cwd,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise DispatchError(
+                f"command timed out after {timeout_seconds}s: {args[0]}"
+            ) from error
         if check and result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip()
             raise DispatchError(
@@ -181,6 +199,25 @@ def optional_bool(
     value = table.get(key, default)
     if not isinstance(value, bool):
         raise DispatchError(f"{context}.{key} must be a boolean")
+    return value
+
+
+def optional_int(
+    table: dict[str, Any],
+    key: str,
+    default: int,
+    context: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = table.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise DispatchError(f"{context}.{key} must be an integer")
+    if not minimum <= value <= maximum:
+        raise DispatchError(
+            f"{context}.{key} must be between {minimum} and {maximum}"
+        )
     return value
 
 
@@ -302,6 +339,28 @@ def load_config(path: Path) -> Config:
                 approve_for_me=optional_bool(
                     values, "approve_for_me", True, context
                 ),
+                resume_command=required_string(values, "resume_command", context)
+                if "resume_command" in values
+                else "/agent continue",
+                turn_timeout_seconds=optional_int(
+                    values,
+                    "turn_timeout_seconds",
+                    3600,
+                    context,
+                    minimum=60,
+                    maximum=86400,
+                ),
+                completion_requires_closed_issue=optional_bool(
+                    values,
+                    "completion_requires_closed_issue",
+                    False,
+                    context,
+                ),
+                disable_issue_title=required_string(
+                    values, "disable_issue_title", context
+                )
+                if "disable_issue_title" in values
+                else "[DISABLE DAEMON]",
                 labels=load_labels(values.get("labels"), f"{context}.labels"),
                 messages=load_messages(values.get("messages"), f"{context}.messages"),
             )
@@ -417,6 +476,34 @@ class StateStore:
         assert task is not None
         return task
 
+    def reset(self, issue: Issue, state: str) -> Task:
+        timestamp = now()
+        self.connection.execute(
+            """
+            UPDATE tasks
+            SET issue_title = ?, issue_url = ?, issue_author = ?, state = ?,
+                thread_id = NULL, last_comment_id = 0, last_message = '',
+                updated_at = ?
+            WHERE project_name = ? AND issue_number = ?
+            """,
+            (
+                issue.title,
+                issue.url,
+                issue.author,
+                state,
+                timestamp,
+                issue.project_name,
+                issue.number,
+            ),
+        )
+        self.connection.commit()
+        task = self.get(issue.project_name, issue.number)
+        if task is None:
+            raise DispatchError(
+                f"cannot reset unknown task {issue.project_name}#{issue.number}"
+            )
+        return task
+
     def update(self, task: Task, **values: Any) -> Task:
         allowed = {"state", "thread_id", "last_comment_id", "last_message"}
         unknown = set(values) - allowed
@@ -475,6 +562,44 @@ class GitHub:
             )
         return sorted(issues, key=lambda issue: issue.number)
 
+    def disable_issues(self, project: Project) -> list[Issue]:
+        result = self.runner.run(
+            [
+                "gh",
+                "issue",
+                "list",
+                "--repo",
+                project.github_repo,
+                "--state",
+                "open",
+                "--search",
+                f'"{project.disable_issue_title}" in:title',
+                "--limit",
+                "100",
+                "--json",
+                "number,title,author,url",
+            ]
+        )
+        try:
+            raw_issues = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise DispatchError("gh returned invalid JSON for disable issue list") from error
+        issues = []
+        for raw in raw_issues:
+            if str(raw.get("title") or "").strip() != project.disable_issue_title:
+                continue
+            author = raw.get("author") or {}
+            issues.append(
+                Issue(
+                    project_name=project.name,
+                    number=int(raw["number"]),
+                    title=str(raw["title"]).strip(),
+                    author=str(author.get("login") or ""),
+                    url=str(raw.get("url") or ""),
+                )
+            )
+        return sorted(issues, key=lambda issue: issue.number)
+
     def comments(self, project: Project, issue_number: int) -> list[Comment]:
         endpoint = f"repos/{project.github_repo}/issues/{issue_number}/comments?per_page=100"
         result = self.runner.run(["gh", "api", "--paginate", endpoint])
@@ -497,6 +622,55 @@ class GitHub:
                 )
         return sorted(comments, key=lambda comment: comment.comment_id)
 
+    def latest_label_actor(
+        self,
+        project: Project,
+        issue_number: int,
+        label: str,
+    ) -> str | None:
+        endpoint = (
+            f"repos/{project.github_repo}/issues/{issue_number}/events?per_page=100"
+        )
+        result = self.runner.run(["gh", "api", "--paginate", endpoint])
+        events = []
+        for page in json_documents(result.stdout):
+            if not isinstance(page, list):
+                raise DispatchError("gh returned a non-array issue events page")
+            if page and isinstance(page[0], list):
+                page = [raw for nested in page for raw in nested]
+            events.extend(page)
+        matching = [
+            event
+            for event in events
+            if event.get("event") == "labeled"
+            and str((event.get("label") or {}).get("name") or "").casefold()
+            == label.casefold()
+        ]
+        if not matching:
+            return None
+        actor = matching[-1].get("actor") or {}
+        login = str(actor.get("login") or "").strip()
+        return login or None
+
+    def issue_completion(self, project: Project, issue_number: int) -> tuple[str, str]:
+        result = self.runner.run(
+            [
+                "gh",
+                "issue",
+                "view",
+                str(issue_number),
+                "--repo",
+                project.github_repo,
+                "--json",
+                "state,stateReason",
+            ]
+        )
+        try:
+            raw = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            raise DispatchError("gh returned invalid JSON for issue state") from error
+        return str(raw.get("state") or ""), str(raw.get("stateReason") or "")
+
     def comment(self, project: Project, issue_number: int, body: str) -> int:
         marked = f"{MARKER}\n{body.strip()}"
         result = self.runner.run(
@@ -517,26 +691,33 @@ class GitHub:
         except ValueError as error:
             raise DispatchError("gh did not return a comment ID") from error
 
+    def has_disable_ack(self, project: Project, issue_number: int) -> bool:
+        return any(
+            DISABLE_ACK_MARKER in comment.body
+            for comment in self.comments(project, issue_number)
+        )
+
     def transition(
         self,
         project: Project,
         issue_number: int,
-        remove_label: str,
+        remove_label: str | Sequence[str],
         add_label: str,
     ) -> None:
+        labels = [remove_label] if isinstance(remove_label, str) else list(remove_label)
+        command = [
+            "gh",
+            "issue",
+            "edit",
+            str(issue_number),
+            "--repo",
+            project.github_repo,
+        ]
+        if labels:
+            command.extend(["--remove-label", ",".join(labels)])
+        command.extend(["--add-label", add_label])
         self.runner.run(
-            [
-                "gh",
-                "issue",
-                "edit",
-                str(issue_number),
-                "--repo",
-                project.github_repo,
-                "--remove-label",
-                remove_label,
-                "--add-label",
-                add_label,
-            ]
+            command
         )
 
     def close(self, project: Project, issue_number: int) -> None:
@@ -679,6 +860,34 @@ class Dispatcher:
             self._recover_interrupted()
         processed = 0
         for project in self.config.projects:
+            disable_issues = [
+                issue
+                for issue in self.github.disable_issues(project)
+                if issue.author.casefold() in project.allowed_authors
+            ]
+            if disable_issues:
+                for issue in disable_issues:
+                    if dry_run:
+                        print(f"would pause {project.name} for {issue.url}")
+                    elif not self.github.has_disable_ack(project, issue.number):
+                        body = (
+                            f"{DISABLE_ACK_MARKER}\n"
+                            + render(
+                                project.messages.paused_comment,
+                                {
+                                    "project_name": project.name,
+                                    "github_repo": project.github_repo,
+                                    "issue_number": issue.number,
+                                    "issue_title": issue.title,
+                                    "issue_url": issue.url,
+                                    "resume_command": project.resume_command,
+                                },
+                            )
+                        )
+                        self.github.comment(project, issue.number, body)
+                processed += len(disable_issues)
+                continue
+
             active = self.store.active(project.name)
             if active and active.state == "waiting":
                 if dry_run:
@@ -695,15 +904,21 @@ class Dispatcher:
             candidates = [
                 issue
                 for issue in ready
-                if self.store.get(project.name, issue.number) is None
+                if (task := self.store.get(project.name, issue.number)) is None
+                or task.state in ("failed", "rejected")
             ]
             if not candidates:
                 continue
             issue = candidates[0]
             if dry_run:
+                label_actor = self.github.latest_label_actor(
+                    project, issue.number, project.trigger_label
+                )
                 verdict = (
                     "would run"
                     if issue.author.casefold() in project.allowed_authors
+                    and label_actor is not None
+                    and label_actor.casefold() in project.allowed_authors
                     else "would reject"
                 )
                 print(f"{verdict} {project.name}#{issue.number}: {issue.title}")
@@ -741,14 +956,41 @@ class Dispatcher:
                 )
 
     def _claim_and_start(self, project: Project, issue: Issue) -> None:
-        if issue.author.casefold() not in project.allowed_authors:
-            task = self.store.create(issue, "rejected")
-            message = f"Автор @{issue.author} не входит в allowed_authors."
+        existing = self.store.get(project.name, issue.number)
+        label_actor = self.github.latest_label_actor(
+            project, issue.number, project.trigger_label
+        )
+        author_allowed = issue.author.casefold() in project.allowed_authors
+        actor_allowed = (
+            label_actor is not None
+            and label_actor.casefold() in project.allowed_authors
+        )
+        if not author_allowed or not actor_allowed:
+            task = (
+                self.store.reset(issue, "rejected")
+                if existing is not None
+                else self.store.create(issue, "rejected")
+            )
+            reasons = []
+            if not author_allowed:
+                reasons.append(f"автор issue @{issue.author} не входит в allowed_authors")
+            if label_actor is None:
+                reasons.append("не найдено событие добавления trigger label")
+            elif not actor_allowed:
+                reasons.append(
+                    f"trigger label добавил @{label_actor}, которого нет в allowed_authors"
+                )
+            message = "; ".join(reasons) + "."
             task = self.store.update(task, last_message=message)
+            remove_labels = [project.trigger_label]
+            if existing is not None:
+                old_label = self._state_label(project, existing.state)
+                if old_label is not None:
+                    remove_labels.append(old_label)
             self.github.transition(
                 project,
                 issue.number,
-                project.trigger_label,
+                remove_labels,
                 project.labels.rejected,
             )
             body = render(
@@ -758,11 +1000,20 @@ class Dispatcher:
             self.github.comment(project, issue.number, body)
             return
 
-        task = self.store.create(issue, "running")
+        task = (
+            self.store.reset(issue, "running")
+            if existing is not None
+            else self.store.create(issue, "running")
+        )
+        remove_labels = [project.trigger_label]
+        if existing is not None:
+            old_label = self._state_label(project, existing.state)
+            if old_label is not None:
+                remove_labels.append(old_label)
         self.github.transition(
             project,
             issue.number,
-            project.trigger_label,
+            remove_labels,
             project.labels.running,
         )
         started = render(
@@ -791,6 +1042,16 @@ class Dispatcher:
         )
         self._execute_turn(project, task, prompt, resume=False)
 
+    @staticmethod
+    def _state_label(project: Project, state: str) -> str | None:
+        return {
+            "running": project.labels.running,
+            "waiting": project.labels.waiting,
+            "completed": project.labels.completed,
+            "failed": project.labels.failed,
+            "rejected": project.labels.rejected,
+        }.get(state)
+
     def _resume_from_comments(self, project: Project, task: Task) -> bool:
         comments = self.github.comments(project, task.issue_number)
         newer = [
@@ -804,13 +1065,20 @@ class Dispatcher:
             for comment in newer
             if comment.author.casefold() in project.allowed_authors
             and MARKER not in comment.body
+            and comment.body.strip().casefold().startswith(
+                project.resume_command.casefold()
+            )
         ]
         task = self.store.update(task, last_comment_id=watermark)
         if not allowed:
             return False
 
         author = ", ".join(dict.fromkeys(comment.author for comment in allowed))
-        body = "\n\n---\n\n".join(comment.body.strip() for comment in allowed)
+        responses = []
+        for comment in allowed:
+            response = comment.body.strip()[len(project.resume_command) :].strip()
+            responses.append(response or "Продолжай работу.")
+        body = "\n\n---\n\n".join(responses)
         latest = allowed[-1]
         values = self._template_values(
             project,
@@ -893,7 +1161,16 @@ class Dispatcher:
                 command.append("--approve-for-me")
             command.append(full_prompt)
 
-        process = self.runner.run(command, cwd=project.local_path, check=False)
+        try:
+            process = self.runner.run(
+                command,
+                cwd=project.local_path,
+                check=False,
+                timeout_seconds=project.turn_timeout_seconds,
+            )
+        except DispatchError as error:
+            self._fail_task(project, task, str(error), thread_id=task.thread_id)
+            return
         log_prefix = result_file.with_suffix("")
         log_prefix.with_suffix(".jsonl").write_text(process.stdout, encoding="utf-8")
         log_prefix.with_suffix(".stderr.log").write_text(
@@ -936,6 +1213,21 @@ class Dispatcher:
 
         task = self.store.update(task, thread_id=thread_id, last_message=message)
         if state == "completed":
+            if project.completion_requires_closed_issue:
+                issue_state, state_reason = self.github.issue_completion(
+                    project, task.issue_number
+                )
+                if issue_state != "CLOSED" or state_reason != "COMPLETED":
+                    self._wait_for_human(
+                        project,
+                        task,
+                        "Агент сообщил completed, но issue ещё не закрыт с reason "
+                        "completed. Для CodeCrawler это означает, что merge/completion "
+                        "workflow не доказан. Проверьте PR и ответьте через "
+                        f"`{project.resume_command} <указание>`.",
+                        thread_id=thread_id,
+                    )
+                    return
             body = render(
                 project.messages.completed_comment,
                 self._template_values(project, task, message=message),
@@ -1029,6 +1321,7 @@ class Dispatcher:
             "comment_author": "",
             "comment_body": "",
             "comment_url": "",
+            "resume_command": project.resume_command,
         }
         values.update(extra)
         return values

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "src" / "agent_dispatch.py"
@@ -53,6 +56,9 @@ start_prompt = "Выполни таск номер $issue_number."
             self.assertEqual(project.allowed_authors, frozenset({"ugliansky"}))
             self.assertEqual(project.labels.waiting, "agent:waiting")
             self.assertIn("$issue_number", project.messages.start_prompt)
+            self.assertEqual(project.resume_command, "/agent continue")
+            self.assertEqual(project.turn_timeout_seconds, 3600)
+            self.assertEqual(project.disable_issue_title, "[DISABLE DAEMON]")
 
     def test_rejects_danger_full_access(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -80,6 +86,43 @@ class ProtocolTests(unittest.TestCase):
             agent_dispatch.thread_id_from_jsonl(output),
             "thread-42",
         )
+
+    def test_finds_actor_of_latest_trigger_label_event(self):
+        class StubRunner:
+            def run(self, args, **kwargs):
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout=json.dumps(
+                        [[
+                            {
+                                "event": "labeled",
+                                "label": {"name": "agent:ready"},
+                                "actor": {"login": "old-user"},
+                            },
+                            {
+                                "event": "labeled",
+                                "label": {"name": "agent:ready"},
+                                "actor": {"login": "ugliansky"},
+                            },
+                        ]]
+                    ),
+                    stderr="",
+                )
+
+        github = agent_dispatch.GitHub(StubRunner())
+        project = SimpleNamespace(github_repo="ugliansky/codecrawler")
+        self.assertEqual(
+            github.latest_label_actor(project, 7, "agent:ready"),
+            "ugliansky",
+        )
+
+    def test_runner_reports_timeout(self):
+        with self.assertRaisesRegex(agent_dispatch.DispatchError, "timed out"):
+            agent_dispatch.Runner().run(
+                [sys.executable, "-c", "import time; time.sleep(1)"],
+                timeout_seconds=0.01,
+            )
 
     def test_worker_marker_is_detectable(self):
         body = f"{agent_dispatch.MARKER}\nWaiting for input"
@@ -120,6 +163,31 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(restored, task)
             self.assertEqual(restored.thread_id, "thread-7")
             self.assertEqual(restored.last_comment_id, 99)
+
+    def test_resets_terminal_task_for_remote_requeue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = agent_dispatch.StateStore(Path(directory) / "state.db")
+            issue = agent_dispatch.Issue(
+                project_name="codecrawler",
+                number=8,
+                title="Initial title",
+                author="ugliansky",
+                url="https://example.test/8",
+            )
+            task = store.create(issue, "failed")
+            store.update(
+                task,
+                thread_id="old-thread",
+                last_comment_id=123,
+                last_message="old failure",
+            )
+            refreshed = dataclasses.replace(issue, title="Updated title")
+            reset = store.reset(refreshed, "running")
+            self.assertEqual(reset.state, "running")
+            self.assertEqual(reset.issue_title, "Updated title")
+            self.assertIsNone(reset.thread_id)
+            self.assertEqual(reset.last_comment_id, 0)
+            self.assertEqual(reset.last_message, "")
 
 
 if __name__ == "__main__":

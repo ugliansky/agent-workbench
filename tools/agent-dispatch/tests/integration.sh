@@ -28,6 +28,12 @@ if [[ "${1:-} ${2:-}" == 'auth status' ]]; then
   exit 0
 elif [[ "${1:-} ${2:-}" == 'repo view' ]]; then
   printf '%s\n' '{"nameWithOwner":"ugliansky/codecrawler"}'
+elif [[ "${1:-} ${2:-}" == 'issue list' && " $* " == *' --search '* ]]; then
+  if [[ -e "$AGENT_DISPATCH_TEST_DISABLE_FILE" ]]; then
+    printf '%s\n' '[{"number":99,"title":"[DISABLE DAEMON]","author":{"login":"ugliansky"},"url":"https://github.com/ugliansky/codecrawler/issues/99"}]'
+  else
+    printf '%s\n' '[]'
+  fi
 elif [[ "${1:-} ${2:-}" == 'issue list' ]]; then
   printf '%s\n' '[{"number":7,"title":"[agent] Fix movement","body":"## Task\\n\\nFix movement.","author":{"login":"ugliansky"},"url":"https://github.com/ugliansky/codecrawler/issues/7"}]'
 elif [[ "${1:-}" == 'api' && " $* " == *' --method POST '* ]]; then
@@ -35,8 +41,10 @@ elif [[ "${1:-}" == 'api' && " $* " == *' --method POST '* ]]; then
   comment_id="$(cat "$counter_file")"
   printf '%s\n' "$((comment_id + 1))" >"$counter_file"
   printf '%s\n' "$comment_id"
+elif [[ "${1:-}" == 'api' && " $* " == *'/events?per_page=100'* ]]; then
+  printf '%s\n' '[[{"id":50,"event":"labeled","label":{"name":"agent:ready"},"actor":{"login":"ugliansky"}}]]'
 elif [[ "${1:-}" == 'api' && " $* " == *' --paginate '* ]]; then
-  printf '%s\n' '[[{"id":101,"body":"<!-- agent-dispatch -->\\nАгенту нужна помощь","user":{"login":"ugliansky"},"html_url":"https://example.test/worker"},{"id":200,"body":"Используй SQLite и продолжай.","user":{"login":"ugliansky"},"html_url":"https://example.test/human"}]]'
+  printf '%s\n' '[[{"id":101,"body":"<!-- agent-dispatch -->\\nАгенту нужна помощь","user":{"login":"ugliansky"},"html_url":"https://example.test/worker"},{"id":200,"body":"/agent continue Используй SQLite и продолжай.","user":{"login":"ugliansky"},"html_url":"https://example.test/human"}]]'
 fi
 EOF
 
@@ -97,6 +105,7 @@ run_dispatch() {
     AGENT_DISPATCH_TEST_GH_LOG="$test_tmp/gh.log" \
     AGENT_DISPATCH_TEST_CODEX_LOG="$test_tmp/codex.log" \
     AGENT_DISPATCH_TEST_COMMENT_COUNTER="$test_tmp/comment-counter" \
+    AGENT_DISPATCH_TEST_DISABLE_FILE="$test_tmp/disable" \
     python3 "$dispatch_root/src/agent_dispatch.py" \
       --config "$test_tmp/config.toml" "$@"
 }
@@ -124,5 +133,13 @@ grep -F -- '--remove-label agent:waiting --add-label agent:running' \
   "$test_tmp/gh.log" >/dev/null
 grep -F -- '--remove-label agent:running --add-label agent:done' \
   "$test_tmp/gh.log" >/dev/null
+
+codex_calls_before_pause="$(wc -l <"$test_tmp/codex.log")"
+touch "$test_tmp/disable"
+run_dispatch run-once >/dev/null
+codex_calls_after_pause="$(wc -l <"$test_tmp/codex.log")"
+[[ "$codex_calls_before_pause" == "$codex_calls_after_pause" ]]
+grep -F -- 'agent-dispatch:disable-ack' "$test_tmp/gh.log" >/dev/null
+rm "$test_tmp/disable"
 
 printf 'agent-dispatch bridge integration test passed\n'

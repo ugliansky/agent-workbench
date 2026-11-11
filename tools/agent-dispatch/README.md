@@ -19,8 +19,14 @@ local port.
    `completed`, `needs_human`, or `failed`.
 5. For `needs_human`, the worker posts the question, applies `agent:waiting`,
    and stores the Codex thread ID and comment watermark in SQLite.
-6. A new comment by an allowed author resumes that same thread. The cycle
-   continues until completion or failure.
+6. A new comment by an allowed author beginning with `/agent continue`
+   resumes that same thread. The cycle continues until completion or failure.
+
+An open issue whose title is exactly `[DISABLE DAEMON]`, created by an allowed
+author, pauses that repository. The worker acknowledges the control issue and
+keeps polling without claiming or resuming tasks. Closing the issue restores
+normal operation. A Codex turn already running in the foreground is not
+force-stopped; the pause takes effect before the next polling action.
 
 The dispatcher deliberately does not create branches, worktrees, commits, or
 pull requests. Those remain part of the agent's repository-specific workflow.
@@ -31,6 +37,8 @@ pull requests. Those remain part of the agent's repository-specific workflow.
   message templates come only from local configuration.
 - Issue text and comments cannot supply paths or Codex CLI flags.
 - Only comments from configured authors resume a waiting thread.
+- The worker verifies that the trigger label was most recently applied by a
+  configured author; issue authorship alone does not authorize execution.
 - Worker comments contain a marker and are never mistaken for human replies,
   even when the worker uses the same GitHub account.
 - Only one active issue is allowed per configured local repository.
@@ -106,10 +114,24 @@ trigger_label = "agent:ready"
 close_issue_on_complete = false
 sandbox = "workspace-write"
 approve_for_me = true
+resume_command = "/agent continue"
+turn_timeout_seconds = 3600
+completion_requires_closed_issue = false
+disable_issue_title = "[DISABLE DAEMON]"
 ```
 
 `sandbox` may be `read-only` or `workspace-write`. The tool does not accept
 `danger-full-access` because turns originate from remote input.
+
+`completion_requires_closed_issue = true` keeps a project in `agent:waiting`
+when Codex reports `completed` before GitHub shows the issue closed with reason
+`completed`. This is useful for repositories where merge and tracker cleanup
+are part of the definition of done.
+
+To retry an `agent:failed` or `agent:rejected` issue remotely, remove its
+terminal state label and reapply the trigger label. The new label event must be
+created by an allowed author. The worker resets the persisted thread and starts
+a fresh Codex session.
 
 ### Message templates
 
@@ -129,11 +151,12 @@ $comment_body
 waiting_comment = "Агенту нужна помощь:\n\n$message"
 completed_comment = "Агент закончил работу:\n\n$message"
 failed_comment = "Агент завершился с ошибкой:\n\n$message"
+paused_comment = "Worker приостановлен. Закройте этот issue для продолжения."
 ```
 
 Available values include `$project_name`, `$github_repo`, `$issue_number`,
 `$issue_title`, `$issue_url`, `$thread_id`, `$message`, `$comment_author`,
-`$comment_body`, and `$comment_url`.
+`$comment_body`, `$comment_url`, and `$resume_command`.
 
 ## States
 

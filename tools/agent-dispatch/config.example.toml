@@ -11,6 +11,10 @@ trigger_label = "agent:ready"
 close_issue_on_complete = false
 sandbox = "workspace-write"
 approve_for_me = true
+resume_command = "/agent continue"
+turn_timeout_seconds = 3600
+completion_requires_closed_issue = false
+disable_issue_title = "[DISABLE DAEMON]"
 
 [projects.labels]
 running = "agent:running"
@@ -34,7 +38,7 @@ waiting_comment = """
 
 $message
 
-Ответьте следующим комментарием в этом issue.
+Ответьте комментарием `$resume_command <ответ>` в этом issue.
 """
 completed_comment = """
 Агент закончил работу:
