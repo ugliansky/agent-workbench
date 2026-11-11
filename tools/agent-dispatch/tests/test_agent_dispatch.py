@@ -128,6 +128,25 @@ class ProtocolTests(unittest.TestCase):
             "ugliansky",
         )
 
+    def test_reads_completion_reason_from_stable_rest_fields(self):
+        class StubRunner:
+            def run(self, args, **kwargs):
+                return subprocess.CompletedProcess(
+                    args,
+                    0,
+                    stdout=json.dumps(
+                        {"state": "closed", "state_reason": "completed"}
+                    ),
+                    stderr="",
+                )
+
+        github = agent_dispatch.GitHub(StubRunner())
+        project = SimpleNamespace(github_repo="ugliansky/codecrawler")
+        self.assertEqual(
+            github.issue_completion(project, 175),
+            ("CLOSED", "COMPLETED"),
+        )
+
     def test_runner_reports_timeout(self):
         with self.assertRaisesRegex(agent_dispatch.DispatchError, "timed out"):
             agent_dispatch.Runner().run(

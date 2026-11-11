@@ -663,20 +663,18 @@ class GitHub:
         result = self.runner.run(
             [
                 "gh",
-                "issue",
-                "view",
-                str(issue_number),
-                "--repo",
-                project.github_repo,
-                "--json",
-                "state,stateReason",
+                "api",
+                f"repos/{project.github_repo}/issues/{issue_number}",
             ]
         )
         try:
             raw = json.loads(result.stdout)
         except json.JSONDecodeError as error:
             raise DispatchError("gh returned invalid JSON for issue state") from error
-        return str(raw.get("state") or ""), str(raw.get("stateReason") or "")
+        return (
+            str(raw.get("state") or "").upper(),
+            str(raw.get("state_reason") or "").upper(),
+        )
 
     def comment(self, project: Project, issue_number: int, body: str) -> int:
         marked = f"{MARKER}\n{body.strip()}"
