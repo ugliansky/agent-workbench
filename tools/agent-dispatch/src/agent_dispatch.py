@@ -106,6 +106,7 @@ class Project:
     close_issue_on_complete: bool
     sandbox: str
     approve_for_me: bool
+    network_access: bool
     resume_command: str
     turn_timeout_seconds: int
     completion_requires_closed_issue: bool
@@ -342,6 +343,9 @@ def load_config(path: Path) -> Config:
                 ),
                 sandbox=sandbox,
                 approve_for_me=approve_for_me,
+                network_access=optional_bool(
+                    values, "network_access", False, context
+                ),
                 resume_command=required_string(values, "resume_command", context)
                 if "resume_command" in values
                 else "/agent continue",
@@ -1175,12 +1179,18 @@ class Dispatcher:
             f"{project.name}-issue-{task.issue_number}-{time.time_ns()}.result.json"
         )
         full_prompt = f"{prompt.strip()}\n\n{PROTOCOL}"
+        config_args = (
+            ["-c", "sandbox_workspace_write.network_access=true"]
+            if project.network_access
+            else []
+        )
         if resume:
             assert task.thread_id is not None
             command = [
                 "codex",
                 "exec",
                 "resume",
+                *config_args,
                 "--json",
                 "--output-schema",
                 str(self.schema_path),
@@ -1193,6 +1203,7 @@ class Dispatcher:
             command = [
                 "codex",
                 "exec",
+                *config_args,
                 "--json",
                 "--output-schema",
                 str(self.schema_path),

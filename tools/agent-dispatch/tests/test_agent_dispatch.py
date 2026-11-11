@@ -59,6 +59,7 @@ start_prompt = "Выполни таск номер $issue_number."
             self.assertEqual(project.resume_command, "/agent continue")
             self.assertEqual(project.turn_timeout_seconds, 3600)
             self.assertEqual(project.disable_issue_title, "[DISABLE DAEMON]")
+            self.assertFalse(project.network_access)
 
     def test_rejects_danger_full_access(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -213,6 +214,7 @@ class RecoveryTests(unittest.TestCase):
                 close_issue_on_complete=False,
                 sandbox="workspace-write",
                 approve_for_me=True,
+                network_access=False,
                 resume_command="/agent continue",
                 turn_timeout_seconds=3600,
                 completion_requires_closed_issue=True,

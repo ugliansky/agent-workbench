@@ -94,6 +94,7 @@ trigger_label = "agent:ready"
 close_issue_on_complete = false
 sandbox = "workspace-write"
 approve_for_me = true
+network_access = true
 
 [projects.messages]
 start_prompt = "Выполни таск номер \$issue_number."
@@ -132,6 +133,7 @@ grep -F $'codecrawler#7\tcompleted\tthread=thread-7' <<<"$second_status" >/dev/n
 grep -F -- 'exec resume' "$test_tmp/codex.log" >/dev/null
 grep -F -- 'thread-7' "$test_tmp/codex.log" >/dev/null
 grep -F -- 'Используй SQLite и продолжай.' "$test_tmp/codex.log" >/dev/null
+[[ "$(grep -c -- 'sandbox_workspace_write.network_access=true' "$test_tmp/codex.log")" -eq 2 ]]
 grep -F -- '--remove-label agent:waiting --add-label agent:running' \
   "$test_tmp/gh.log" >/dev/null
 grep -F -- '--remove-label agent:running --add-label agent:done' \

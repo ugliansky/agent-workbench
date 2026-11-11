@@ -119,6 +119,7 @@ trigger_label = "agent:ready"
 close_issue_on_complete = false
 sandbox = "workspace-write"
 approve_for_me = true
+network_access = false
 resume_command = "/agent continue"
 turn_timeout_seconds = 3600
 completion_requires_closed_issue = false
@@ -131,6 +132,13 @@ disable_issue_title = "[DISABLE DAEMON]"
 worker deliberately omits the mutually exclusive explicit `--sandbox` flag
 when automatic approval is enabled. Set `approve_for_me = false` for an
 explicit read-only or non-auto-approved workspace-write run.
+
+`network_access = true` passes Codex's documented
+`sandbox_workspace_write.network_access=true` override to both initial and
+resumed turns. It permits outbound commands such as authenticated `gh` while
+retaining the workspace-write filesystem sandbox. The default is `false`;
+enable it only for a trusted, dedicated checkout whose workflow requires
+network mutations.
 
 `completion_requires_closed_issue = true` keeps a project in `agent:waiting`
 when Codex reports `completed` before GitHub shows the issue closed with reason
