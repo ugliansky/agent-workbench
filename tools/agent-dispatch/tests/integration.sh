@@ -115,8 +115,11 @@ run_dispatch run-once
 
 first_status="$(run_dispatch status)"
 grep -F $'codecrawler#7\twaiting\tthread=thread-7' <<<"$first_status" >/dev/null
-grep -F -- '--sandbox workspace-write' "$test_tmp/codex.log" >/dev/null
 grep -F -- '--approve-for-me' "$test_tmp/codex.log" >/dev/null
+if grep -F -- '--sandbox workspace-write' "$test_tmp/codex.log" >/dev/null; then
+  printf 'integration test combined incompatible Codex flags\n' >&2
+  exit 1
+fi
 if grep -F -- 'danger-full-access' "$test_tmp/codex.log" >/dev/null; then
   printf 'integration test found danger-full-access\n' >&2
   exit 1

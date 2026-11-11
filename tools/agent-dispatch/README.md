@@ -121,7 +121,11 @@ disable_issue_title = "[DISABLE DAEMON]"
 ```
 
 `sandbox` may be `read-only` or `workspace-write`. The tool does not accept
-`danger-full-access` because turns originate from remote input.
+`danger-full-access` because turns originate from remote input. Codex CLI's
+`--approve-for-me` already selects the reviewed workspace-write path, so the
+worker deliberately omits the mutually exclusive explicit `--sandbox` flag
+when automatic approval is enabled. Set `approve_for_me = false` for an
+explicit read-only or non-auto-approved workspace-write run.
 
 `completion_requires_closed_issue = true` keeps a project in `agent:waiting`
 when Codex reports `completed` before GitHub shows the issue closed with reason

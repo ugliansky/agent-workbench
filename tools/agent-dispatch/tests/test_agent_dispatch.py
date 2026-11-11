@@ -68,6 +68,16 @@ start_prompt = "Выполни таск номер $issue_number."
                     self.write_config(root, sandbox="danger-full-access")
                 )
 
+    def test_rejects_auto_approval_with_read_only_sandbox(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(
+                agent_dispatch.DispatchError, "approve_for_me"
+            ):
+                agent_dispatch.load_config(
+                    self.write_config(root, sandbox="read-only")
+                )
+
     def test_rejects_unknown_template_variable(self):
         with self.assertRaisesRegex(agent_dispatch.DispatchError, "unknown"):
             agent_dispatch.validate_template("Hello $unknown", "test")

@@ -312,6 +312,11 @@ def load_config(path: Path) -> Config:
             raise DispatchError(
                 f"{context}.sandbox must be read-only or workspace-write"
             )
+        approve_for_me = optional_bool(values, "approve_for_me", True, context)
+        if approve_for_me and sandbox != "workspace-write":
+            raise DispatchError(
+                f"{context}.approve_for_me requires sandbox = workspace-write"
+            )
 
         if name in names:
             raise DispatchError(f"duplicate project name: {name}")
@@ -336,9 +341,7 @@ def load_config(path: Path) -> Config:
                     values, "close_issue_on_complete", False, context
                 ),
                 sandbox=sandbox,
-                approve_for_me=optional_bool(
-                    values, "approve_for_me", True, context
-                ),
+                approve_for_me=approve_for_me,
                 resume_command=required_string(values, "resume_command", context)
                 if "resume_command" in values
                 else "/agent continue",
@@ -1154,11 +1157,11 @@ class Dispatcher:
                 str(self.schema_path),
                 "--output-last-message",
                 str(result_file),
-                "--sandbox",
-                project.sandbox,
             ]
             if project.approve_for_me:
                 command.append("--approve-for-me")
+            else:
+                command.extend(["--sandbox", project.sandbox])
             command.append(full_prompt)
 
         try:
